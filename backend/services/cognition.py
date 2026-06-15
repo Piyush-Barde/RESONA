@@ -1,28 +1,50 @@
 # services/cognition.py
+import os
+import sys
 from openai import AsyncOpenAI
+
+backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
+
+from config import settings  # Ensure settings configuration parameters are mapped
 
 class CognitionService:
     def __init__(self):
-        # Pointing to a standard local/remote inference server setup
-        # Modify the base_url or api_key here if you are using Groq, Ollama, or LM Studio!
+        # Dynamically pulls endpoint targets and keys from settings to prevent raw hardcoding
+        # For Groq: base_url="https://api.groq.com/openai/v1", api_key="gsk_..."
+        # For Ollama: base_url="http://127.0.0.1:11434/v1", api_key="ollama"
         self.client = AsyncOpenAI(
-            base_url="https://api.openai.com/v1", 
-            api_key="YOUR_OPENAI_OR_LLAMA_API_KEY"
+            base_url=getattr(settings, "LLM_BASE_URL", "https://api.openai.com/v1"), 
+            api_key=getattr(settings, "LLM_API_KEY", "YOUR_API_KEY_HERE")
         )
-        print("🧠 Cognition AI client mapped and ready.")
+        # Fallback model selection from settings template or default mini specs
+        self.model_name = getattr(settings, "LLM_MODEL", "gpt-4o-mini")
+        print(f"🧠 Cognition AI client mapped and ready. Target Engine: {self.model_name}")
 
-    async def fetch_empathetic_stream(self, user_prompt: str):
-        """Streams text chunks in real-time from the LLM back to the WebSocket."""
+    async def stream_response(self, user_prompt: str):
+        """
+        Asynchronously streams text tokens in real-time back to the main WebSocket pipeline.
+        Matches the exact naming requirement called by the main.py runtime task.
+        """
         try:
             response_stream = await self.client.chat.completions.create(
-                model="gpt-4o-mini", # Switch to your local model name if running locally (e.g., "llama3")
+                model=self.model_name,
                 messages=[
-                    {"role": "system", "content": "You are Resona, an empathetic and supportive voice assistant."},
+                    {
+                        "role": "system", 
+                        "content": "You are Resona, an empathetic, supportive, and concise voice assistant. Keep answers short."
+                    },
                     {"role": "user", "content": user_prompt}
                 ],
                 stream=True
             )
-            return response_stream
+            
+            # Iterate through the stream chunks asynchronously as they arrive from the network matrix
+            async for chunk in response_stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+                    
         except Exception as e:
-            print(f"⚠️ Cognition Model Error: {str(e)}")
-            raise e
+            print(f"⚠️ Cognition Model Streaming Error: {str(e)}")
+            yield f"[Cognition Error: Please check your API configuration or endpoint mapping - {str(e)}]"
