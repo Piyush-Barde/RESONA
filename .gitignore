@@ -18,3 +18,20 @@ Thumbs.db
 # IDE settings
 .vscode/
 .idea/
+
+# Ignore local database and weights
+backend/data/resona.db
+backend/data/*.gguf
+backend/data/chat_history.json
+backend/data/temp/
+
+# Ignore Python dependencies
+__pycache__/
+*.pyc
+.env
+venv/
+.venv/
+
+# Ignore frontend dependencies
+frontend/node_modules/
+frontend/dist/
