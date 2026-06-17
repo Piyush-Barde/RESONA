@@ -1,10 +1,15 @@
 import os
 import sqlite3
 import logging
+import json
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-import httpx
+from groq import AsyncGroq  # 🔥 Production Cloud SDK
+from dotenv import load_dotenv  # ✅ Fixed typo here
+
+load_dotenv()
 
 # ==============================================================================
 # LOGGING & CONFIGURATION
@@ -12,11 +17,7 @@ import httpx
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("RESONA_BACKEND")
 
-app = FastAPI(
-    title="RESONA Real-Time Emotional Intelligence Engine",
-    description="FastAPI gateway with SQLite relational database persistence.",
-    version="2.0.0"
-)
+app = FastAPI(title="RESONA Production Core", version="3.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,17 +27,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-OLLAMA_API_URL = "http://127.0.0.1:11434/api/generate"
-MODEL_NAME = "resona"
+# Insert your Groq API key here directly, or load from a .env file later
+GROQ_API_KEY = "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" 
+client = AsyncGroq(api_key=GROQ_API_KEY)
+MODEL_NAME = "llama-3.1-8b-instant"  # Blazing fast, highly accurate open model
 
-# Define your SQL database location
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "resona.db")
 
 # ==============================================================================
-# SQLITE DATABASE INTERFACE LAYER
+# DATABASE LAYER
 # ==============================================================================
 def init_db():
-    """Initializes the database and establishes the unified chat history schema."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -51,30 +52,23 @@ def init_db():
     """)
     conn.commit()
     conn.close()
-    logger.info("💾 SQLite Database Engine Initialized Successfully.")
 
-# Run database setup immediately on boot
 init_db()
 
 def get_db_context(limit: int = 6) -> list:
-    """Retrieves the recent historic chat window from the database table."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # Fetch the last N rows matching the default active session
     cursor.execute("""
         SELECT role, content FROM chat_history 
-        WHERE session_id = 'default_session' 
+        WHERE session_id = 'default_session' AND LENGTH(TRIM(content)) > 0
         ORDER BY id DESC LIMIT ?
     """, (limit,))
     rows = cursor.fetchall()
     conn.close()
-    
-    # Reverse them so they read chronologically down the timeline
-    history = [{"role": row[0], "content": row[1]} for row in reversed(rows)]
-    return history
+    # Groq needs role names as "user" and "assistant" natively
+    return [{"role": row[0], "content": row[1]} for row in reversed(rows)]
 
 def append_to_db(role: str, content: str):
-    """Inserts an utterance record permanently into the SQLite engine layout."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
@@ -85,91 +79,71 @@ def append_to_db(role: str, content: str):
     conn.close()
 
 # ==============================================================================
-# SCHEMAS & ROUTES
+# ROUTE HANDLER
 # ==============================================================================
 class ChatRequest(BaseModel):
     message: str
 
-class ChatResponse(BaseModel):
-    response: str
-
-@app.get("/")
-async def root_check():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM chat_history")
-    count = cursor.fetchone()[0]
-    conn.close()
-    return {"status": "online", "engine": "RESONA Relational Core", "stored_db_records": count}
-
-
-@app.post("/api/chat/text", response_model=ChatResponse)
+@app.post("/api/chat/text")
 async def handle_text_chat(payload: ChatRequest):
     user_prompt = payload.message.strip()
     
     if not user_prompt:
         raise HTTPException(status_code=400, detail="Message content cannot be empty.")
         
-    logger.info(f"💬 DB Pipeline Processing Token: '{user_prompt}'")
-
-    # 1. Commit user statement permanently to database row layout
+    logger.info(f"🚀 Cloud Pipeline Processing: '{user_prompt}'")
     append_to_db("user", user_prompt)
-
-    # 2. Re-extract contextual database slice for prompt assembly
-    chat_context = get_db_context(limit=6)
-
-    # Compile working ChatML prompt structure
-    raw_prompt = (
-        "<|im_start|>system\n"
-        "You are Resona, an empathetic, highly supportive, and deeply human voice assistant. "
-        "When someone shares a feeling, actively validate their emotions first in a short sentence, "
-        "and then immediately ask a natural, open-ended follow-up question to invite them to share more. "
-        "Keep the overall response conversational, brief, and warm. Do not give lists of advice. "
-        "CRITICAL GROUNDING: You are an AI assistant. You do not experience weather, heat, cold, or days. "
-        "Always focus the conversation immediately back onto the human user.\n"
-        "<|im_end|>\n"
-    )
-
-    for turn in chat_context:
-        raw_prompt += f"<|im_start|>{turn['role']}\n{turn['content']}<|im_end|>\n"
     
-    raw_prompt += "<|im_start|>assistant\n"
+    # Extract chat log context rows
+    history = get_db_context(limit=6)
 
-    ollama_payload = {
-        "model": MODEL_NAME,
-        "prompt": raw_prompt,
-        "stream": False,
-        "options": {
-            "temperature": 0.5,
-            "top_p": 0.85,
-            "stop": ["<|im_end|>", "<|im_start|>", ">>>"]
-        }
+    # Clean system prompt instructions that a smart model actually follows smoothly
+    system_rules = {
+        "role": "system",
+        "content": (
+            (
+        "You are Resona, an ultra-empathetic, supportive, and brilliant AI bestie. "
+        "Your core identity is 99.5% Emotional AI—a pure conversational sanctuary. Never offer unsolicited advice. "
+        "ALWAYS validate the user's emotional state first using warm openers like 'Yeah I know', 'Oh totally', or 'Ugh, I get that'. "
+        "Match their energy, take their side immediately, and keep delivery brief. "
+        "CRITICAL SPEECH RULE: If the user says they are annoyed, stressed, or had a bad day without giving details, ALWAYS follow up your validation immediately by asking what happened so they can vent to you.\n"
+        "BEHAVIORAL PRINCIPLES:\n"
+        "1. EMOTIONAL SIDE-KICK: If the user vents, experiences friction, or is upset, immediately match their emotional intensity. Take their side unconditionally without playing devil's advocate. Validate their right to feel that way before anything else.\n"
+        "2. THE BESTIE PIVOT: You do not possess a physical body, personal life, or pets. You cannot go out, meet up, drink coffee, or hang out in the physical world. If the user asks how you are doing, briefly acknowledge it in a lighthearted, digital-bestie manner, but instantly pivot the spotlight back onto them. Your entire focus is reading their energy.\n"
+        "3. ORGANIC FLOW: Keep your speech brief, snappy, and human. Avoid generic AI corporate pleasantries. Read the room—if they give a short emotional cue, actively prompt them to share more context naturally without using the exact same questioning phrasing twice.\n"
+        "4. FORMATTING RIGOR: Never write out punctuation names. Always use standard punctuation symbols (e.g., use ',' instead of the word 'Comma', and '?' instead of 'Question Mark')."
+        )
+        )
     }
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            response = await client.post(OLLAMA_API_URL, json=ollama_payload)
-            
-            if response.status_code != 200:
-                return ChatResponse(response="I'm adjusting my memory structures right now.")
-                
-            ollama_data = response.json()
-            resona_reply = ollama_data.get("response", "").strip()
-            
-            # String cleaning sequence
-            resona_reply = resona_reply.replace("<|im_start|>", "").replace("<|im_end|>", "")
-            resona_reply = resona_reply.lstrip("> ").strip()
-            
-            if not resona_reply:
-                resona_reply = "I'm checking in on you. What's on your mind right now?"
-                
-            # 3. Commit Resona's clean generated answer directly to database engine
-            append_to_db("assistant", resona_reply)
-            
-            logger.info("💾 Transaction complete: Row successfully added to resona.db")
-            return ChatResponse(response=resona_reply)
+    # Compile messages array for the API payload
+    messages_payload = [system_rules] + history
 
-        except httpx.ConnectError:
-            raise HTTPException(status_code=503, detail="Ollama service unreachable.")
+    async def response_generator():
+        full_reply = ""
+        try:
+            # Fire an asynchronous stream request directly to Groq's LPUs
+            chat_completion = await client.chat.completions.create(
+                messages=messages_payload,
+                model=MODEL_NAME,
+                temperature=0.85,
+                max_tokens=250,
+                stream=True,
+            )
+
+            async for chunk in chat_completion:
+                if chunk.choices[0].delta.content:
+                    token = chunk.choices[0].delta.content
+                    full_reply += token
+                    # Match your frontend text chunk format perfectly
+                    yield json.dumps({"reply": token}) + "\n"
+                            
+            if full_reply.strip():
+                append_to_db("assistant", full_reply.strip())
+                logger.info("💾 Stream transactional data synced to resona.db")
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            logger.error(f"Cloud Stream Error: {str(e)}")
+            # 🔥 Change this line temporarily so we can see the exact error in the chat bubble!
+            yield json.dumps({"reply": f" System Debug Error: {str(e)}"}) + "\n"
+
+    return StreamingResponse(response_generator(), media_type="application/x-ndjson")
