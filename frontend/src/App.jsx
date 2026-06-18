@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Mic, Square, Keyboard, Send } from 'lucide-react';
 import './App.css'; 
 
@@ -15,6 +15,14 @@ export default function App() {
 
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
+  
+  // ⚡ Auto-scroll anchor point tracking
+  const chatEndRef = useRef(null);
+
+  // Automatically glides down whenever a new token or message shifts the height array
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
   // ------------------------------------------------------------------------------
   // STREAM-COMPATIBLE TEXT ROUTE API HANDLING
@@ -175,6 +183,8 @@ export default function App() {
             <div className="message-content-text">{msg.text}</div>
           </div>
         ))}
+        {/* Invisible anchor element that forces the window to scroll view naturally */}
+        <div ref={chatEndRef} />
       </div>
 
       {/* FOOTER CONTROLLER DOCK */}
