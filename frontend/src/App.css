@@ -245,3 +245,59 @@
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
 }
+.voice-selector-wrapper {
+  margin: 0 15px;
+}
+
+.voice-dropdown {
+  background: #1e1e24;
+  color: #e4e4ed;
+  border: 1px solid #3a3a4a;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+  outline: none;
+  transition: all 0.2s ease;
+}
+
+.voice-dropdown:hover {
+  border-color: #5a5a7a;
+  background: #25252d;
+}
+
+.voice-dropdown:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* --- VOICE DROP-DOWN HEADER MOUNTING LAYER --- */
+.voice-selector-wrapper {
+  margin: 0 20px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.voice-dropdown {
+  background: #16161a;
+  color: #3b82f6; /* Sleek blue tint matching your mic accent color */
+  border: 1px solid #2a2a35;
+  padding: 8px 14px;
+  border-radius: 20px; /* Rounded pill style matching your theme aesthetic */
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  outline: none;
+  transition: all 0.25s ease;
+}
+
+.voice-dropdown:hover {
+  border-color: #3b82f6;
+  background: #1e1e24;
+}
+
+.voice-dropdown:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

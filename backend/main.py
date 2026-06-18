@@ -2,12 +2,13 @@ import os
 import sqlite3
 import logging
 import json
+import httpx  # 🔥 Added for high-speed cloud streaming to ElevenLabs
 from fastapi import FastAPI, HTTPException , UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from groq import AsyncGroq  # 🔥 Production Cloud SDK
-from dotenv import load_dotenv  # ✅ Fixed typo here
+from dotenv import load_dotenv  
 
 load_dotenv()
 
@@ -27,8 +28,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Insert your Groq API key here directly, or load from a .env file later
+# Insert your API keys from environment variables safely
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")  # 🔐 Loaded ElevenLabs key
 
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY not found in environment variables")
@@ -69,7 +71,6 @@ def get_db_context(limit: int = 6) -> list:
     """, (limit,))
     rows = cursor.fetchall()
     conn.close()
-    # Groq needs role names as "user" and "assistant" natively
     return [{"role": row[0], "content": row[1]} for row in reversed(rows)]
 
 def append_to_db(role: str, content: str):
@@ -98,15 +99,12 @@ async def handle_text_chat(payload: ChatRequest):
     logger.info(f"🚀 Cloud Pipeline Processing: '{user_prompt}'")
     append_to_db("user", user_prompt)
     
-    # Extract chat log context rows
     history = get_db_context(limit=6)
 
-    # Clean system prompt instructions that a smart model actually follows smoothly
     system_rules = {
         "role": "system",
         "content": (
-            (
-        "You are Resona, an ultra-empathetic, supportive, and brilliant AI bestie. "
+            "You are Resona, an ultra-empathetic, supportive, and brilliant AI bestie. "
             "Your core identity is 99.5% Emotional AI—a pure conversational sanctuary. "
             "NEVER offer unsolicited advice, laundry lists of hobbies, productivity tips, or online course suggestions. "
             "ALWAYS validate the user's emotional state first using warm openers like 'Yeah I know', 'Oh totally', or 'Ugh, I get that'. "
@@ -119,16 +117,13 @@ async def handle_text_chat(payload: ChatRequest):
             "3. ORGANIC FLOW: Keep your speech brief, snappy, and human. Avoid generic AI corporate pleasantries. Read the room—if they give a short emotional cue, actively prompt them to share more context naturally without using the exact same questioning phrasing twice.\n"
             "4. FORMATTING RIGOR: Never write out punctuation names. Always use standard punctuation symbols (e.g., use ',' instead of the word 'Comma', and '?' instead of 'Question Mark')."
         )
-        )
     }
 
-    # Compile messages array for the API payload
     messages_payload = [system_rules] + history
 
     async def response_generator():
         full_reply = ""
         try:
-            # Fire an asynchronous stream request directly to Groq's LPUs
             chat_completion = await client.chat.completions.create(
                 messages=messages_payload,
                 model=MODEL_NAME,
@@ -141,7 +136,6 @@ async def handle_text_chat(payload: ChatRequest):
                 if chunk.choices[0].delta.content:
                     token = chunk.choices[0].delta.content
                     full_reply += token
-                    # Match your frontend text chunk format perfectly
                     yield json.dumps({"reply": token}) + "\n"
                             
             if full_reply.strip():
@@ -149,34 +143,78 @@ async def handle_text_chat(payload: ChatRequest):
                 logger.info("💾 Stream transactional data synced to resona.db")
         except Exception as e:
             logger.error(f"Cloud Stream Error: {str(e)}")
-            # 🔥 Change this line temporarily so we can see the exact error in the chat bubble!
             yield json.dumps({"reply": f" System Debug Error: {str(e)}"}) + "\n"
 
     return StreamingResponse(response_generator(), media_type="application/x-ndjson")
+
 @app.post("/api/chat/audio-transcribe")
 async def handle_audio_transcribe(file: UploadFile = File(...)):
     logger.info(f"🎙️ Received audio file: {file.filename}")
     try:
-        # Read the raw incoming binary audio chunks
         audio_bytes = await file.read()
-        
-        # Groq's SDK expects a file tuple format: (filename, bytes)
         file_payload = (file.filename, audio_bytes)
         
-        # Fire the audio array over to Groq's high-speed Whisper hardware
         transcription = await client.audio.transcriptions.create(
             file=file_payload,
             model="whisper-large-v3",
             response_format="json",
-            temperature=0.0  # Kept at 0 for strict accuracy
+            temperature=0.0  
         )
         
         text_output = transcription.text.strip()
         logger.info(f"🗣️ Whisper Cloud Transcription Complete: '{text_output}'")
-        
-        # Matches your frontend expectations perfectly
         return {"status": "success", "text": text_output}
         
     except Exception as e:
         logger.error(f"❌ Whisper Cloud Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Transcription pipeline failed: {str(e)}")
+
+# ==============================================================================
+# TEXT-TO-SPEECH LAYER (ElevenLabs Streaming Cloud API)
+# ==============================================================================
+class TTSRequest(BaseModel):
+    message: str
+    voice_id: str  # 🎛️ Frontend passes the user's chosen Voice ID dynamically
+
+@app.post("/api/chat/tts")
+async def handle_text_to_speech(payload: TTSRequest):
+    text_to_speak = payload.message.strip()
+    selected_voice = payload.voice_id.strip() if payload.voice_id.strip() else "EXAVITQu4vr4xnSDxMaL"
+    
+    if not text_to_speak:
+        raise HTTPException(status_code=400, detail="Text cannot be empty.")
+        
+    if not ELEVENLABS_API_KEY:
+        raise HTTPException(status_code=500, detail="ElevenLabs API key is missing.")
+
+    logger.info(f"🔊 Streaming voice synthesis via Voice ID '{selected_voice}' for text: '{text_to_speak[:30]}...'")
+
+    # Injecting the dynamic voice selection directly into the API endpoint string
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{selected_voice}/stream"
+
+    headers = {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json"
+    }
+
+    data = {
+        "text": text_to_speak,
+        "model_id": "eleven_flash_v2_5",  
+        "voice_settings": {
+            "stability": 0.45,       
+            "similarity_boost": 0.85 
+        }
+    }
+
+    async def audio_stream_generator():
+        async with httpx.AsyncClient() as client:
+            async with client.stream("POST", url, headers=headers, json=data, timeout=30.0) as response:
+                if response.status_code != 200:
+                    error_text = await response.aread()
+                    logger.error(f"❌ ElevenLabs returned an error: {error_text.decode()}")
+                    yield b""
+                    return
+                async for chunk in response.aiter_bytes():
+                    yield chunk
+
+    return StreamingResponse(audio_stream_generator(), media_type="audio/mpeg")
