@@ -1,7 +1,7 @@
 import requests
 
 # 🔑 Hardcode your key right here temporarily
-api_key = "sk_31b70985a0fabd7c7fc2d07d4d04dc2c99a4c8a38c699d1a"
+api_key = "."
 
 print("🔍 Fetching your real account voice strings from ElevenLabs...")
 url = "https://api.elevenlabs.io/v1/voices"
