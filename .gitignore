@@ -1,37 +1,34 @@
-# Virtual Environment
-backend/venv/
+# Virtual Environments
 venv/
+.venv/
 env/
 ENV/
+backend/venv/
 
-# Python caching
+# Python Cache
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 .pytest_cache/
 
-# Operating System temporary files
-.DS_Store
-Thumbs.db
+# Environment Variables
+.env
 
-# IDE settings
+# IDE Settings
 .vscode/
 .idea/
 
-# Ignore local database and weights
-backend/data/resona.db
-backend/data/*.gguf
-backend/data/chat_history.json
-backend/data/temp/
+# OS Files
+.DS_Store
+Thumbs.db
 
-# Ignore Python dependencies
-__pycache__/
-*.pyc
-.env
-venv/
-.venv/
-
-# Ignore frontend dependencies
+# Frontend
 frontend/node_modules/
 frontend/dist/
+
+# Local Databases, Models & Runtime Data
+backend/data/resona.db
+backend/data/chat_history.json
+backend/data/*.gguf
+backend/data/temp/

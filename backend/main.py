@@ -28,7 +28,11 @@ app.add_middleware(
 )
 
 # Insert your Groq API key here directly, or load from a .env file later
-GROQ_API_KEY = "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" 
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+if not GROQ_API_KEY:
+    raise RuntimeError("GROQ_API_KEY not found in environment variables")
+
 client = AsyncGroq(api_key=GROQ_API_KEY)
 MODEL_NAME = "llama-3.1-8b-instant"  # Blazing fast, highly accurate open model
 
