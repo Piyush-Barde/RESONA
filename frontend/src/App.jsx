@@ -228,31 +228,109 @@ export default function App() {
     }
   };
 
-  // Shared Helper Layer to manage Speech execution
+// Production-Grade Streaming Audio Queue with a Stutter-Reduction Prebuffer
   const executeVoiceSynthesis = async (textString) => {
-    console.log(`🔊 Dispatching vocal payload via active voice state: ${currentVoice}`);
+    console.log(`🔊 Initializing jitter-buffered audio stream queue for Voice ID: ${currentVoice}`);
     try {
-      const ttsResponse = await fetch("http://localhost:8000/api/chat/tts", {
+      const response = await fetch("http://localhost:8000/api/chat/tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
           message: textString,
-          voice_id: currentVoice // 🌟 Dynamically matching payload choice selection state
+          voice_id: currentVoice 
         }),
       });
       
-      if (ttsResponse.ok) {
-        const audioBlob = await ttsResponse.blob();
-        const audioUrl = URL.createObjectURL(audioBlob);
-        const audio = new Audio(audioUrl);
-        await audio.play();
-        console.log("🎉 Audio binary active across local sound card!");
+      if (!response.ok) throw new Error("Vocalization stream failed");
+
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      const audioCtx = new AudioContext();
+      const reader = response.body.getReader();
+      
+      let audioQueue = [];
+      let isPlayingQueue = false;
+      let nextStartTime = audioCtx.currentTime;
+      
+      // ⏱️ Prebuffer configuration: Don't start playback until 2 chunks are loaded
+      const PREBUFFER_THRESHOLD = 2; 
+      let totalChunksReceived = 0;
+
+      const playQueue = async () => {
+        // Prevent overlapping player instances or premature playback before buffer fills
+        if (isPlayingQueue || audioQueue.length < (totalChunksReceived === 0 ? PREBUFFER_THRESHOLD : 1)) return;
+        isPlayingQueue = true;
+
+        while (audioQueue.length > 0) {
+          const rawBuffer = audioQueue.shift();
+          try {
+            const audioBuffer = await audioCtx.decodeAudioData(rawBuffer);
+            const source = audioCtx.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioCtx.destination);
+            
+            // Align the chunk perfectly end-to-end on the timeline pointer
+            const startTime = Math.max(nextStartTime, audioCtx.currentTime);
+            source.start(startTime);
+            nextStartTime = startTime + audioBuffer.duration;
+
+            // Wait until this specific clip finishes playing before allowing the next one to load
+            await new Promise(resolve => setTimeout(resolve, audioBuffer.duration * 1000));
+          } catch (e) {
+            console.debug("Synchronizing streaming frame boundary data clip...");
+          }
+        }
+        isPlayingQueue = false;
+      };
+
+      let accumulatedChunks = [];
+      let accumulatedLength = 0;
+      const BATCH_SIZE = 48 * 1024; // Balanced 48KB frame window for low latency + steady data flow
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          // Flush out any remaining audio bytes left over in the final window packet
+          if (accumulatedChunks.length > 0) {
+            const finalBuffer = new Uint8Array(accumulatedLength);
+            let offset = 0;
+            for (const c of accumulatedChunks) {
+              finalBuffer.set(c, offset);
+              offset += c.length;
+            }
+            audioQueue.push(finalBuffer.buffer);
+            totalChunksReceived++;
+            await playQueue();
+          }
+          break;
+        }
+
+        accumulatedChunks.push(value);
+        accumulatedLength += value.length;
+
+        // When our data window hits 48KB, pack it and send it straight to the pipeline queue
+        if (accumulatedLength >= BATCH_SIZE) {
+          const mergedBuffer = new Uint8Array(accumulatedLength);
+          let offset = 0;
+          for (const c of accumulatedChunks) {
+            mergedBuffer.set(c, offset);
+            offset += c.length;
+          }
+          
+          audioQueue.push(mergedBuffer.buffer);
+          totalChunksReceived++;
+          
+          accumulatedChunks = [];
+          accumulatedLength = 0;
+          
+          // Let the player attempt to run. It will automatically wait until the prebuffer threshold is met.
+          playQueue();
+        }
       }
+
     } catch (ttsErr) {
       console.error("❌ Vocalization audio context generation failed:", ttsErr);
     }
   };
-
   return (
     <div className="resona-container">
       <header className="resona-header">
