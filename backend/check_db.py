@@ -15,3 +15,8 @@ for row in rows:
     print(row)
 
 conn.close()
+@app.get("/api/chat/history/{session_id}")
+async def get_session_history(session_id: str):
+    """Fetches full chat history for a clicked sidebar session thread."""
+    safe_session = "".join(c for c in session_id if c.isalnum() or c in "-_")
+    return get_db_context(session_id=safe_session, limit=20)

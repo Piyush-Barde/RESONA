@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Mic, Square, Keyboard, Send } from 'lucide-react';
+import { Mic, Square, Keyboard, Send, Trash2, MessageSquare, Plus, Menu } from 'lucide-react';
 import './App.css'; 
+
+let globalAudioCtx = null;
 
 export default function App() {
   const [inputMode, setInputMode] = useState('voice'); 
@@ -8,13 +10,20 @@ export default function App() {
   const [inputText, setInputText] = useState('');
   const [isProcessingText, setIsProcessingText] = useState(false);
   
-  // 🎛️ Voice Menu State Configuration
-  const [currentVoice, setCurrentVoice] = useState('EXAVITQu4vr4xnSDxMaL'); // Default to Bella
+  // 🗄️ PERSISTENT LOCAL STORAGE VOICE SYNC LOCK
+  const [currentVoice, setCurrentVoice] = useState(() => {
+    return localStorage.getItem("resona_voice_id") || "EXAVITQu4vr4xnSDxMaL";
+  });
   
+  // Sidebar Feed Tracking States
+  const [sessionsList, setSessionsList] = useState([]);
+  const [activeSession, setActiveSession] = useState('default_session');
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+
   const voiceOptions = [
-    { name: "✨ Bella (Warm)", id: "EXAVITQu4vr4xnSDxMaL" },   // Unrestricted Female
-    { name: "🍃 Nicole (Whispery)", id: "cQthpqGcbbtPoEMXj1AB" }, // Unrestricted Female 
-    { name: "🌊 Antoni (Smooth Male)", id: "ErXwobaYiN019PkySvjV" } // Unrestricted Male
+    { name: "✨ Bella (Warm)", id: "EXAVITQu4vr4xnSDxMaL" },   
+    { name: "🍃 Nicole (Whispery)", id: "cQthpqGcbbtPoEMXj1AB" }, 
+    { name: "🌊 Antoni (Smooth Male)", id: "ErXwobaYiN019PkySvjV" } 
   ];
 
   const [messages, setMessages] = useState([
@@ -25,17 +34,91 @@ export default function App() {
   const audioChunksRef = useRef([]);
   const chatEndRef = useRef(null);
 
+  // Sync auto-scrolling on bubble addition
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // Fetch sidebar list items on initial startup or context mutations
+  useEffect(() => {
+    loadSessionsList();
+  }, [messages, activeSession]);
+
+  const loadSessionsList = async () => {
+    try {
+      const response = await fetch("http://localhost:8000/api/chat/sessions");
+      if (response.ok) {
+        const data = await response.json();
+        setSessionsList(data);
+      }
+    } catch (err) {
+      console.error("Sidebar background session stream sync failure:", err);
+    }
+  };
+
+  // Explicit voice change interceptor to lock settings dynamically
+  const handleVoiceChange = (e) => {
+    const selectedVoiceId = e.target.value;
+    setCurrentVoice(selectedVoiceId);
+    localStorage.setItem("resona_voice_id", selectedVoiceId);
+    console.log(`🔒 Voice state preference locked in localStorage: ${selectedVoiceId}`);
+  };
+
+  const selectActiveThread = async (sessionId) => {
+    setActiveSession(sessionId);
+    try {
+      const response = await fetch(`http://localhost:8000/api/chat/history/${sessionId}`);
+      if (response.ok) {
+        const data = await response.json();
+        if (data.length === 0) {
+          setMessages([{ sender: 'resona', text: "Hey! This is a blank conversation space. Share what's up..." }]);
+        } else {
+          setMessages(data);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load thread timeline:", err);
+    }
+  };
+
+  const createNewChatSession = () => {
+    const randomHexId = "chat_" + Math.random().toString(36).substring(2, 9);
+    setActiveSession(randomHexId);
+    setMessages([{ sender: 'resona', text: "Brand new canvas! I'm listening, tell me everything..." }]);
+  };
+
+  const preWarmAudioHardware = () => {
+    if (!globalAudioCtx) {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      globalAudioCtx = new AudioContext();
+    }
+    if (globalAudioCtx.state === "suspended") globalAudioCtx.resume();
+  };
+
+  const handleClearHistory = async () => {
+    if (!window.confirm("Are you sure you want to completely clear this specific chat session?")) return;
+
+    try {
+      const response = await fetch(`http://localhost:8000/api/chat/clear/${activeSession}`, {
+        method: "DELETE"
+      });
+      if (response.ok) {
+        setMessages([{ sender: 'resona', text: "Memory wiped clean. Let's start fresh! What's on your mind?" }]);
+        loadSessionsList();
+      }
+    } catch (err) {
+      console.error("Deletion sync failure:", err);
+    }
+  };
+
   // ------------------------------------------------------------------------------
-  // TEXT SUBMISSION ROUTE (Handles Text Streaming & TTS Playback)
+  // TEXT DATA PIPELINE LOOP
   // ------------------------------------------------------------------------------
   const handleSendMessage = async (e) => {
     if (e) e.preventDefault();
     if (!inputText.trim() || isProcessingText) return;
 
+    preWarmAudioHardware();
     const userMessage = { sender: 'user', text: inputText };
     setMessages(prev => [...prev, userMessage, { sender: 'resona', text: '' }]);
     
@@ -49,12 +132,10 @@ export default function App() {
       const response = await fetch("http://localhost:8000/api/chat/text", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: textToSend }),
+        body: JSON.stringify({ message: textToSend, session_id: activeSession }),
       });
       
-      if (!response.ok) {
-        throw new Error(`Server responded with status: ${response.status}`);
-      }
+      if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder("utf-8");
@@ -72,51 +153,45 @@ export default function App() {
           if (line.trim()) {
             try {
               const parsed = JSON.parse(line);
+              
+              if (parsed.polished_input) {
+                setMessages(prev => {
+                  const updated = [...prev];
+                  if (updated[updated.length - 2]) updated[updated.length - 2].text = parsed.polished_input;
+                  return updated;
+                });
+              }
+
               if (parsed.reply) {
                 full_reply += parsed.reply; 
                 setMessages(prev => {
                   const updated = [...prev];
                   const lastIndex = updated.length - 1;
                   if (updated[lastIndex] && updated[lastIndex].sender === 'resona') {
-                    updated[lastIndex] = {
-                      ...updated[lastIndex],
-                      text: updated[lastIndex].text + parsed.reply
-                    };
+                    updated[lastIndex] = { ...updated[lastIndex], text: updated[lastIndex].text + parsed.reply };
                   }
                   return updated;
                 });
               }
-            } catch (err) {
-              console.debug("Skimming stream metadata lines...");
-            }
+            } catch (err) {}
           }
         }
       }
 
-      // --- DYNAMIC AUDIO SYNTHESIS EXECUTION ---
-      if (full_reply.trim()) {
-        await executeVoiceSynthesis(full_reply);
-      }
+      if (full_reply.trim()) await executeVoiceSynthesis(full_reply);
 
     } catch (error) {
-      console.error("❌ Failed to parse text stream:", error);
-      setMessages(prev => {
-        const updated = [...prev];
-        const lastIndex = updated.length - 1;
-        if (updated[lastIndex] && updated[lastIndex].text === '') {
-          updated[lastIndex].text = "Ugh, my memory registers just glitched out. Say that to me again?";
-        }
-        return updated;
-      });
+      console.error("❌ Failed text pipeline iteration:", error);
     } finally {
       setIsProcessingText(false);
     }
   };
 
   // ------------------------------------------------------------------------------
-  // VOICE HARDWARE RECORDING ENGINE
+  // MIC AUDIO LOGIC LAYER
   // ------------------------------------------------------------------------------
   const startRecording = async () => {
+    preWarmAudioHardware();
     audioChunksRef.current = [];
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -125,9 +200,7 @@ export default function App() {
         options = { mimeType: 'audio/webm;codecs=opus' };
       }
 
-      console.log(`🎙️ Recording container type locked: ${options.mimeType}`);
       mediaRecorderRef.current = new MediaRecorder(stream, options);
-      
       mediaRecorderRef.current.ondataavailable = (event) => {
         if (event.data.size > 0) audioChunksRef.current.push(event.data);
       };
@@ -141,8 +214,7 @@ export default function App() {
       mediaRecorderRef.current.start();
       setIsRecording(true);
     } catch (err) {
-      console.error("Microphone hardware access blocked:", err);
-      alert("Microphone hardware disconnected or authorization denied. Double check site permissions!");
+      console.error("Mic initialization block trace:", err);
     }
   };
 
@@ -153,9 +225,6 @@ export default function App() {
     }
   };
 
-  // ------------------------------------------------------------------------------
-  // VOICE PROCESSING & AUTO-SUBMISSION PIPELINE
-  // ------------------------------------------------------------------------------
   const sendAudioToBackend = async (audioBlob) => {
     setIsProcessingText(true);
     const formData = new FormData();
@@ -169,8 +238,6 @@ export default function App() {
       const data = await response.json();
       
       if (data.status === "success" && data.text.trim().length > 0) {
-        console.log(`🗣️ Transcribed text payload: "${data.text}". Triggering live auto-forwarding...`);
-        
         const userMessage = { sender: 'user', text: data.text };
         setMessages(prev => [...prev, userMessage, { sender: 'resona', text: '' }]);
         
@@ -179,11 +246,9 @@ export default function App() {
         const chatResponse = await fetch("http://localhost:8000/api/chat/text", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: data.text }),
+          body: JSON.stringify({ message: data.text, session_id: activeSession }),
         });
         
-        if (!chatResponse.ok) throw new Error("Text processing system unresolvable");
-
         const reader = chatResponse.body.getReader();
         const decoder = new TextDecoder("utf-8");
         let buffer = "";
@@ -216,80 +281,66 @@ export default function App() {
           }
         }
 
-        if (full_reply.trim()) {
-          await executeVoiceSynthesis(full_reply);
-        }
+        if (full_reply.trim()) await executeVoiceSynthesis(full_reply);
       }
     } catch (error) {
       console.error("Transcription execution loop failed:", error);
     } finally {
-      setInputText(''); 
       setIsProcessingText(false);
     }
   };
 
-// Production-Grade Streaming Audio Queue with a Stutter-Reduction Prebuffer
+  // ------------------------------------------------------------------------------
+  // MULTI-BUFFER SPEECH STREAMING BACKBONE
+  // ------------------------------------------------------------------------------
   const executeVoiceSynthesis = async (textString) => {
-    console.log(`🔊 Initializing jitter-buffered audio stream queue for Voice ID: ${currentVoice}`);
     try {
+      preWarmAudioHardware();
       const response = await fetch("http://localhost:8000/api/chat/tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ 
-          message: textString,
-          voice_id: currentVoice 
-        }),
+        body: JSON.stringify({ message: textString, voice_id: currentVoice }),
       });
       
       if (!response.ok) throw new Error("Vocalization stream failed");
 
-      const AudioContext = window.AudioContext || window.webkitAudioContext;
-      const audioCtx = new AudioContext();
       const reader = response.body.getReader();
-      
       let audioQueue = [];
       let isPlayingQueue = false;
-      let nextStartTime = audioCtx.currentTime;
+      let nextStartTime = globalAudioCtx.currentTime;
       
-      // ⏱️ Prebuffer configuration: Don't start playback until 2 chunks are loaded
       const PREBUFFER_THRESHOLD = 2; 
       let totalChunksReceived = 0;
 
       const playQueue = async () => {
-        // Prevent overlapping player instances or premature playback before buffer fills
         if (isPlayingQueue || audioQueue.length < (totalChunksReceived === 0 ? PREBUFFER_THRESHOLD : 1)) return;
         isPlayingQueue = true;
 
         while (audioQueue.length > 0) {
           const rawBuffer = audioQueue.shift();
           try {
-            const audioBuffer = await audioCtx.decodeAudioData(rawBuffer);
-            const source = audioCtx.createBufferSource();
+            const audioBuffer = await globalAudioCtx.decodeAudioData(rawBuffer);
+            const source = globalAudioCtx.createBufferSource();
             source.buffer = audioBuffer;
-            source.connect(audioCtx.destination);
-            
-            // Align the chunk perfectly end-to-end on the timeline pointer
-            const startTime = Math.max(nextStartTime, audioCtx.currentTime);
+            source.connect(globalAudioCtx.destination);
+
+            const startTime = Math.max(nextStartTime, globalAudioCtx.currentTime);
             source.start(startTime);
             nextStartTime = startTime + audioBuffer.duration;
 
-            // Wait until this specific clip finishes playing before allowing the next one to load
             await new Promise(resolve => setTimeout(resolve, audioBuffer.duration * 1000));
-          } catch (e) {
-            console.debug("Synchronizing streaming frame boundary data clip...");
-          }
+          } catch (e) {}
         }
         isPlayingQueue = false;
       };
 
       let accumulatedChunks = [];
       let accumulatedLength = 0;
-      const BATCH_SIZE = 48 * 1024; // Balanced 48KB frame window for low latency + steady data flow
+      const BATCH_SIZE = 48 * 1024; 
 
       while (true) {
         const { value, done } = await reader.read();
         if (done) {
-          // Flush out any remaining audio bytes left over in the final window packet
           if (accumulatedChunks.length > 0) {
             const finalBuffer = new Uint8Array(accumulatedLength);
             let offset = 0;
@@ -307,7 +358,6 @@ export default function App() {
         accumulatedChunks.push(value);
         accumulatedLength += value.length;
 
-        // When our data window hits 48KB, pack it and send it straight to the pipeline queue
         if (accumulatedLength >= BATCH_SIZE) {
           const mergedBuffer = new Uint8Array(accumulatedLength);
           let offset = 0;
@@ -315,96 +365,121 @@ export default function App() {
             mergedBuffer.set(c, offset);
             offset += c.length;
           }
-          
           audioQueue.push(mergedBuffer.buffer);
           totalChunksReceived++;
-          
           accumulatedChunks = [];
           accumulatedLength = 0;
-          
-          // Let the player attempt to run. It will automatically wait until the prebuffer threshold is met.
           playQueue();
         }
       }
 
     } catch (ttsErr) {
-      console.error("❌ Vocalization audio context generation failed:", ttsErr);
+      console.error("Audio engine context boundary track exception:", ttsErr);
     }
   };
+
   return (
-    <div className="resona-container">
-      <header className="resona-header">
-        <div className="logo-group">
-          <div className="status-dot animate-pulse" />
-          <h1 className="logo-text">RESONA</h1>
-        </div>
-        
-        {/* 🎛️ NEW: Styled Voice Selector Interface Dropdown Container */}
-        <div className="voice-selector-wrapper">
-          <select 
-            value={currentVoice} 
-            onChange={(e) => setCurrentVoice(e.target.value)}
-            className="voice-dropdown"
-            disabled={isProcessingText || isRecording}
+    <div className="app-layout-wrapper" style={{ display: 'flex', width: '100vw', height: '100vh', background: '#0B0F17', overflow: 'hidden' }}>
+      
+      {/* 🧭 PREMIUM CHATGPT-STYLE CONVERSATION HISTORY SIDEBAR */}
+      {sidebarOpen && (
+        <aside className="resona-sidebar" style={{ width: '260px', background: '#0D131F', borderRight: '1px solid #1F2937', display: 'flex', flexDirection: 'column', padding: '12px', boxSizing: 'border-box' }}>
+          <button 
+            onClick={createNewChatSession}
+            style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%', padding: '10px 14px', background: 'transparent', border: '1px dashed #4B5563', borderRadius: '6px', color: '#E5E7EB', cursor: 'pointer', textAlign: 'left', fontWeight: '500', fontSize: '14px', marginBottom: '16px' }}
           >
-            {voiceOptions.map((voice) => (
-              <option key={voice.id} value={voice.id}>
-                {voice.name}
-              </option>
+            <Plus size={16} /> New Chat Space
+          </button>
+
+          <div className="sidebar-feed-container" style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <span style={{ fontSize: '11px', color: '#6B7280', fontWeight: '600', textTransform: 'uppercase', tracking: '0.05em', paddingLeft: '4px', marginBottom: '6px' }}>Past Conversations</span>
+            {sessionsList.map((session) => (
+              <button
+                key={session.session_id}
+                onClick={() => selectActiveThread(session.session_id)}
+                style={{ display: 'flex', alignItems: 'center', gap: '10px', width: '100%', padding: '10px', background: activeSession === session.session_id ? '#1E293B' : 'transparent', border: 'none', borderRadius: '6px', color: activeSession === session.session_id ? '#38BDF8' : '#9CA3AF', cursor: 'pointer', textAlign: 'left', fontSize: '13.5px', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}
+              >
+                <MessageSquare size={14} style={{ opacity: 0.7, flexShrink: 0 }} />
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{session.display_name}</span>
+              </button>
             ))}
-          </select>
-        </div>
-
-        <span className="core-badge">99.5% Emotional Core</span>
-      </header>
-
-      <div className="chat-display">
-        {messages.map((msg, index) => (
-          <div key={index} className={`message-bubble-row ${msg.sender}`}>
-            <div className="message-content-text">{msg.text}</div>
           </div>
-        ))}
-        <div ref={chatEndRef} />
-      </div>
+        </aside>
+      )}
 
-      <footer className="resona-footer">
-        <div className="input-wrapper">
-          {inputMode === 'voice' ? (
-            <div className={`voice-panel ${isRecording ? 'recording-active' : ''}`}>
-              <p className="status-message">
-                {isRecording ? "Listening to you vent..." : isProcessingText ? "Processing your voice weights..." : "Tap to speak with Resona"}
-              </p>
-              <div className="voice-controls">
-                <button type="button" onClick={() => setInputMode('text')} className="icon-button key-toggle" title="Switch to Typing">
-                  <Keyboard size={20} />
-                </button>
-                <button type="button" onClick={isRecording ? stopRecording : startRecording} className={`mic-action-btn ${isRecording ? 'recording-pulse' : 'idle-mic'}`}>
-                  {isRecording ? <Square size={24} fill="currentColor" /> : <Mic size={24} />}
-                </button>
-                <div className="spacer-node" />
-                <div className="voice-wave-container" />
-              </div>
+      {/* 💻 MAIN CONVERSATION SCREEN WRAPPER CONTAINER */}
+      <div className="resona-container" style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%' }}>
+        <header className="resona-header">
+          <div className="logo-group" style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <button onClick={() => setSidebarOpen(!sidebarOpen)} style={{ background: 'none', border: 'none', color: '#9CA3AF', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+              <Menu size={20} />
+            </button>
+            <div className="status-dot animate-pulse" />
+            <h1 className="logo-text">RESONA</h1>
+          </div>
+          
+          <div className="header-controls" style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <div className="voice-selector-wrapper">
+              <select 
+                value={currentVoice} 
+                onChange={handleVoiceChange} // ⚡ Persistent choice tracker
+                className="voice-dropdown"
+                disabled={isProcessingText || isRecording}
+              >
+                {voiceOptions.map((voice) => (
+                  <option key={voice.id} value={voice.id}>{voice.name}</option>
+                ))}
+              </select>
             </div>
-          ) : (
-            <form onSubmit={handleSendMessage} className="text-panel">
-              <input
-                type="text"
-                value={inputText}
-                onChange={(e) => setInputText(e.target.value)}
-                placeholder="Share what's going on..."
-                className="text-input-field"
-                disabled={isProcessingText}
-              />
-              <button type="button" onClick={() => setInputMode('voice')} className="icon-button mic-toggle" title="Switch to Voice Mode">
-                <Mic size={18} />
-              </button>
-              <button type="submit" disabled={!inputText.trim() || isProcessingText} className={`send-action-btn ${inputText.trim() ? 'active-send' : 'disabled-send'}`}>
-                <Send size={16} />
-              </button>
-            </form>
-          )}
+
+            <button onClick={handleClearHistory} className="trash-reset-btn" title="Clear Chat Session History" style={{ background: 'none', border: 'none', color: '#6B7280', cursor: 'pointer', padding: '4px' }}>
+              <Trash2 size={20} className="hover:text-red-400 transition-colors" />
+            </button>
+          </div>
+          <span className="core-badge">99.5% Emotional Core</span>
+        </header>
+
+        <div className="chat-display" style={{ flex: 1, overflowY: 'auto' }}>
+          {messages.map((msg, index) => (
+            <div key={index} className={`message-bubble-row ${msg.sender}`}>
+              <div className="message-content-text">{msg.text}</div>
+            </div>
+          ))}
+          <div ref={chatEndRef} />
         </div>
-      </footer>
+
+        <footer className="resona-footer">
+          <div className="input-wrapper">
+            {inputMode === 'voice' ? (
+              <div className={`voice-panel ${isRecording ? 'recording-active' : ''}`}>
+                {isProcessingText ? (
+                  <div className="thinking-orb-container">
+                    <div className="thinking-orb" />
+                    <p className="status-message" style={{ color: '#9CA3AF' }}>Resona is translating thoughts...</p>
+                  </div>
+                ) : (
+                  <p className="status-message">{isRecording ? "Listening to you vent..." : "Tap to speak with Resona"}</p>
+                )}
+
+                <div className="voice-controls">
+                  <button type="button" onClick={() => setInputMode('text')} className="icon-button key-toggle" title="Switch to Typing"><Keyboard size={20} /></button>
+                  <button type="button" onMouseEnter={preWarmAudioHardware} onFocus={preWarmAudioHardware} onClick={isRecording ? stopRecording : startRecording} className={`mic-action-btn ${isRecording ? 'recording-pulse' : 'idle-mic'}`}>
+                    {isRecording ? <Square size={24} fill="currentColor" /> : <Mic size={24} />}
+                  </button>
+                  <div className="spacer-node" />
+                  <div className="voice-wave-container" />
+                </div>
+              </div>
+            ) : (
+              <form onSubmit={handleSendMessage} className="text-panel">
+                <input type="text" value={inputText} onChange={(e) => setInputText(e.target.value)} placeholder="Share what's going on..." className="text-input-field" disabled={isProcessingText} />
+                <button type="button" onClick={() => setInputMode('voice')} className="icon-button mic-toggle" title="Switch to Voice Mode"><Mic size={18} /></button>
+                <button type="submit" disabled={!inputText.trim() || isProcessingText} className={`send-action-btn ${inputText.trim() ? 'active-send' : 'disabled-send'}`}><Send size={16} /></button>
+              </form>
+            )}
+          </div>
+        </footer>
+      </div>
     </div>
   );
 }
