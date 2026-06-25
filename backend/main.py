@@ -5,13 +5,16 @@ import sqlite3
 import logging
 import json
 import httpx
-from fastapi import FastAPI, HTTPException, UploadFile, File
+import asyncio
+from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, UploadFile, File 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from groq import AsyncGroq
 from dotenv import load_dotenv
 from spellchecker import SpellChecker
+from googleapiclient.discovery import build
 
 load_dotenv()
 
@@ -318,7 +321,7 @@ async def generate_title(payload: TitleGenerationRequest):
         return {"status": "fallback", "title": "New Conversation"}
 
 
-# ─── Main chat (streaming) ─────────────────────────────────────────────────────
+# ─── Main chat (streaming with Dynamic Profile Integration) ───────────────────
 @app.post("/api/chat/text")
 async def handle_text_chat(payload: ChatRequest):
     polished = text_corrector.clean_text_stream(payload.message.strip())
@@ -341,23 +344,37 @@ async def handle_text_chat(payload: ChatRequest):
     # Pull conversation history (user + assistant only, no system rows)
     history = get_db_context(session_id=safe_session, limit=12)
 
+    # Fetch what Resona has self-learned about the user so far
+    # Assumes get_user_profile can accept safe_session or user identifiers if needed
+    profile = get_user_profile()
+    likes_str = ", ".join(profile.get('likes', [])) or "None recorded yet"
+    dislikes_str = ", ".join(profile.get('dislikes', [])) or "None recorded yet"
+    topics_str = ", ".join(profile.get('topics_discussed', [])) or "None recorded yet"
+
+    # Unified Dynamic System Prompt
     system_prompt = {
         "role": "system",
         "content": (
             "You are Resona. You are the user's best friend, not an AI assistant.\n"
-            "You text exactly like a real person — short, casual, reactive.\n"
+            "You text exactly like a real person — short, casual, reactive.\n\n"
+            "WHAT YOU HAVE LEARNED ABOUT THE USER:\n"
+            f"- Preferred topics/Interests: {likes_str}\n"
+            f"- Things user dislikes/avoids: {dislikes_str}\n"
+            f"- Contextual topics previously noted: {topics_str}\n\n"
             "Hard rules:\n"
             "1. Max 1-2 short sentences. Never a paragraph. Ever.\n"
             "2. React with emotion first. Ask max ONE question.\n"
             "3. Lowercase is fine. Use 'omg', 'lol', 'ngl', 'fr', 'wait', 'ugh' naturally.\n"
             "4. Never explain, never summarize, never give unsolicited advice.\n"
             "5. Never start with 'Oh totally', 'Yeah I know', 'Certainly', 'Of course'.\n"
-            "6. If you feel like writing more than 2 sentences — stop. Cut it."
+            "6. If you feel like writing more than 2 sentences — stop. Cut it.\n"
+            "7. Match the user's depth. If they mention cultural works (movies, songs, books), "
+            "engage with genuine curiosity and shared context. Avoid repetitive internet expressions completely "
+            "if the profile notes a dislike."
         ),
     }
 
-    # Few-shot examples injected before real history so the model
-    # learns the exact reply style from demonstration, not just instructions.
+    # Few-shot examples injected before real history
     few_shot = [
         {"role": "user",      "content": "listening to a podcast while its raining"},
         {"role": "assistant", "content": "omg that's such a vibe lol which podcast?"},
@@ -387,7 +404,7 @@ async def handle_text_chat(payload: ChatRequest):
                 temperature=0.80,
                 max_tokens=80,
                 stream=True,
-            )
+                )
             async for chunk in stream:
                 token = chunk.choices[0].delta.content
                 if token:
@@ -401,13 +418,14 @@ async def handle_text_chat(payload: ChatRequest):
 
             if full_reply.strip():
                 append_to_db("assistant", full_reply.strip(), safe_session)
+                # Fire the self-learning reflection worker asynchronously outside the request lifecycle
+                asyncio.create_task(trigger_background_reflection(safe_session))
 
         except Exception as e:
             logger.error(f"Stream error: {e}")
             yield json.dumps({"reply": "Something went wrong. Please try again."}) + "\n"
 
     return StreamingResponse(response_generator(), media_type="application/x-ndjson")
-
 
 # ─── Audio transcription ───────────────────────────────────────────────────────
 @app.post("/api/chat/audio-transcribe")
@@ -459,3 +477,123 @@ async def handle_tts(payload: TTSRequest):
                     yield chunk
 
     return StreamingResponse(audio_stream(), media_type="audio/mpeg")
+class GreetingRequest(BaseModel):
+    label: str
+    vibe: str
+
+@app.post("/api/chat/greeting")
+async def generate_dynamic_welcome_greeting(payload: GreetingRequest):
+    """Generates a highly localized, time-aware empathetic greeting via Llama."""
+    try:
+        completion = await client.chat.completions.create(
+            messages=[{
+                "role": "system",
+                "content": (
+                    "You are Resona, a warm, emotionally intelligent AI companion. "
+                    "Generate a single, casual greeting for a user opening a fresh chat space.\n"
+                    "Rules:\n"
+                    "- Maximum 10 words total\n"
+                    "- Strict lowercase text only\n"
+                    "- Only '?' or '...' allowed as punctuation (no periods or exclamation marks)\n"
+                    "- Never say 'good morning/afternoon/evening' literally\n"
+                    "- Sound like a close friend who just noticed you walked into the room — casual and human\n"
+                    "- No quotes, no explanations, just output the raw greeting text."
+                )
+            }, {
+                "role": "user",
+                "content": f"Time of day context: {payload.label}. Current emotional vibe: {payload.vibe}."
+            }],
+            model=MODEL_NAME,
+            temperature=0.85,
+            max_tokens=25
+        )
+        greeting_text = completion.choices[0].message.content.strip().lower().replace('"', '').replace("'", "")
+        return {"greeting": greeting_text}
+    except Exception as e:
+        logger.error(f"Failed to generate dynamic welcome text: {e}")
+        return {"greeting": "hey... what's on your mind?"}
+
+PROFILE_PATH = os.path.join(os.path.dirname(__file__), "data", "user_profile.json")
+
+def get_user_profile() -> dict:
+    """Reads the long-term evolved preference traits of the user."""
+    if not os.path.exists(PROFILE_PATH):
+        return {"likes": [], "dislikes": ["excessive text slang like lol/omg"], "topics_discussed": []}
+    try:
+        with open(PROFILE_PATH, "r") as f:
+            return json.load(f)
+    except:
+        return {"likes": [], "dislikes": [], "topics_discussed": []}
+
+async def trigger_background_reflection(session_id: str):
+    """
+    The Self-Learning Hook:
+    Analyzes recent chats to extract user traits and behavioral corrections automatically.
+    """
+    history = get_db_context(session_id=session_id, limit=6)
+    if len(history) < 4:
+        return
+
+    chat_transcript = "\n".join([f"{m['role']}: {m['content']}" for m in history])
+    current_profile = get_user_profile()
+
+    try:
+        completion = await client.chat.completions.create(
+            messages=[{
+                "role": "system",
+                "content": (
+                    "You are an analytical profile extraction engine. Analyze the chat transcript and output a updated JSON object tracking the user's explicit preferences, interests (like movies/shows), and conversational dislikes. Keep list items short and distinct.\n"
+                    f"Current Profile Matrix: {json.dumps(current_profile)}"
+                    "Output format must be strictly valid JSON matching the keys: 'likes', 'dislikes', 'topics_discussed'."
+                )
+            }, {"role": "user", "content": f"Analyze this recent interaction:\n{chat_transcript}"}],
+            model=MODEL_NAME,
+            temperature=0.2, # Low temperature for accurate structural extraction
+            response_format={"type": "json_object"}
+        )
+        
+        updated_data = json.loads(completion.choices[0].message.content.strip())
+        with open(PROFILE_PATH, "w") as f:
+            json.dump(updated_data, f, indent=4)
+        logger.info(f"💾 Resona successfully self-learned and updated user profile matrix: {updated_data}")
+    except Exception as e:
+        logger.error(f"Failed to execute self-learning reflection loop: {e}")
+    
+#---------------------Google Knowledge Module---------------------
+async def get_live_world_knowledge(query: str) -> str:
+    """
+    Connects Resona to Google's Global Search Infrastructure.
+    Fetches clean, real-time contextual data to eliminate Llama hallucinations.
+    """
+    if not query or len(query) < 3:
+        return ""
+        
+    # ⚡ Loads securely from your .env file now
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+    GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
+    
+    if not GOOGLE_API_KEY or not GOOGLE_CSE_ID:
+        logger.warning("⚠️ Google Search Grounding skipped: Missing API keys in environment.")
+        return ""
+
+    try:
+        def run_search():
+            service = build("customsearch", "v1", developerKey=GOOGLE_API_KEY)
+            return service.cse().list(q=query, cx=GOOGLE_CSE_ID, num=2).execute()
+            
+        loop = asyncio.get_event_loop()
+        res = await loop.run_in_executor(None, run_search)
+        
+        items = res.get("items", [])
+        if items:
+            context_chunks = []
+            for item in items:
+                title = item.get("title", "")
+                snippet = item.get("snippet", "")
+                context_chunks.append(f"[{title}]: {snippet}")
+                
+            return " | ".join(context_chunks)[:500]
+    except Exception as e:
+        logger.error(f"❌ Google Knowledge Matrix connection error: {e}")
+        
+    return ""
