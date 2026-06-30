@@ -1,26 +1,5 @@
 {
-    "likes": [
-        "comfy clothes",
-        "spicy food",
-        "classic Bollywood movies",
-        "Jab We Met",
-        "Anamika's sass",
-        "Aditya's awkward moments",
-        "Veer Zaara",
-        "Love Actually"
-    ],
-    "dislikes": [
-        "excessive text slang like lol/omg",
-        "lot",
-        "oh my god"
-    ],
-    "topics_discussed": [
-        "self-care",
-        "Bollywood movies",
-        "food preferences",
-        "movies",
-        "TV shows",
-        "similar movies",
-        "Hollywood movies"
-    ]
+    "likes": [],
+    "dislikes": [],
+    "topics_discussed": []
 }
